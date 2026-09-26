@@ -2,9 +2,14 @@ from pathlib import Path
 import re
 
 import torch
+import streamlit as st
+
 from ultralytics import YOLO
 from paddleocr import TextRecognition
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSeq2SeqLM
+)
 
 
 # =========================================================
@@ -13,53 +18,98 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 BASE_DIR = Path(__file__).resolve().parent
 
-YOLO_PATH = BASE_DIR / "models" / "best (3).pt"
+YOLO_PATH = (
+    BASE_DIR
+    / "models"
+    / "best (3).pt"
+)
 
-T5_PATH = BASE_DIR / "models" / "final_t5_receipt_model"
+T5_PATH = (
+    BASE_DIR
+    / "models"
+    / "final_t5_receipt_model"
+)
 
 
 # =========================================================
 # Load Models
 # =========================================================
 
-print("Loading YOLO model...")
-yolo_model = YOLO(str(YOLO_PATH))
+@st.cache_resource
+def load_models():
+
+    print("Loading YOLO model...")
+
+    yolo_model = YOLO(
+        str(YOLO_PATH)
+    )
 
 
-print("Loading PaddleOCR model...")
-recognizer = TextRecognition(
-    model_name="en_PP-OCRv4_mobile_rec"
-)
+    print("Loading PaddleOCR model...")
+
+    recognizer = TextRecognition(
+        model_name="en_PP-OCRv4_mobile_rec"
+    )
 
 
-print("Loading T5 model...")
+    print("Loading T5 model...")
 
-tokenizer = AutoTokenizer.from_pretrained(
-    str(T5_PATH)
-)
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(T5_PATH)
+    )
 
-t5_model = AutoModelForSeq2SeqLM.from_pretrained(
-    str(T5_PATH)
-)
+    t5_model = AutoModelForSeq2SeqLM.from_pretrained(
+        str(T5_PATH)
+    )
 
 
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else "cpu"
-)
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
 
-t5_model.to(device)
-t5_model.eval()
 
-print(f"Models loaded successfully. Device: {device}")
+    t5_model.to(device)
+
+    t5_model.eval()
+
+
+    print(
+        f"Models loaded successfully. "
+        f"Device: {device}"
+    )
+
+
+    return (
+        yolo_model,
+        recognizer,
+        tokenizer,
+        t5_model,
+        device
+    )
+
+
+(
+    yolo_model,
+    recognizer,
+    tokenizer,
+    t5_model,
+    device
+) = load_models()
 
 
 # =========================================================
-# YOLO + PaddleOCR
+# OCR Pipeline
+# YOLO -> Reading Order -> PaddleOCR
 # =========================================================
 
 def get_prediction(image_path):
 
-    # Detect text regions using YOLO
+    # -----------------------------------------------------
+    # YOLO Text Detection
+    # -----------------------------------------------------
+
     result = yolo_model.predict(
         source=str(image_path),
         conf=0.4,
@@ -67,31 +117,48 @@ def get_prediction(image_path):
         verbose=False
     )[0]
 
+
     image = result.orig_img
 
-    boxes = result.boxes.xyxy.cpu().numpy()
-
-
-    # Sort boxes according to vertical center
-    boxes = sorted(
-        boxes,
-        key=lambda box: (box[1] + box[3]) / 2
+    boxes = (
+        result.boxes
+        .xyxy
+        .cpu()
+        .numpy()
     )
 
 
-    # =====================================================
-    # Group boxes into text lines
-    # =====================================================
+    # -----------------------------------------------------
+    # Sort boxes by vertical center
+    # -----------------------------------------------------
+
+    boxes = sorted(
+        boxes,
+        key=lambda box: (
+            box[1] + box[3]
+        ) / 2
+    )
+
 
     lines = []
 
+
+    # -----------------------------------------------------
+    # Group boxes into lines
+    # -----------------------------------------------------
 
     for box in boxes:
 
         x1, y1, x2, y2 = box
 
-        cy = (y1 + y2) / 2
-        height = y2 - y1
+        cy = (
+            y1 + y2
+        ) / 2
+
+        height = (
+            y2 - y1
+        )
+
 
         placed = False
 
@@ -99,11 +166,19 @@ def get_prediction(image_path):
         for line in lines:
 
             if (
-                abs(cy - line["cy"])
-                < min(height, line["height"]) * 0.5
+                abs(
+                    cy - line["cy"]
+                )
+                <
+                min(
+                    height,
+                    line["height"]
+                ) * 0.5
             ):
 
-                line["boxes"].append(box)
+                line["boxes"].append(
+                    box
+                )
 
                 placed = True
 
@@ -112,32 +187,45 @@ def get_prediction(image_path):
 
         if not placed:
 
-            lines.append({
-                "cy": cy,
-                "height": height,
-                "boxes": [box]
-            })
+            lines.append(
+                {
+                    "cy": cy,
+                    "height": height,
+                    "boxes": [box]
+                }
+            )
 
 
-    # Sort lines top -> bottom
+    # -----------------------------------------------------
+    # Sort lines top to bottom
+    # -----------------------------------------------------
+
     lines.sort(
-        key=lambda line: line["cy"]
+        key=lambda line:
+        line["cy"]
     )
 
 
     predicted_lines = []
 
 
-    # =====================================================
-    # OCR each detected region
-    # =====================================================
+    # -----------------------------------------------------
+    # PaddleOCR Recognition
+    # -----------------------------------------------------
+
+    image_height, image_width = (
+        image.shape[:2]
+    )
+
 
     for line in lines:
 
-        # Sort boxes left -> right
+        # Sort boxes left to right
         line["boxes"].sort(
-            key=lambda box: box[0]
+            key=lambda box:
+            box[0]
         )
+
 
         line_texts = []
 
@@ -150,18 +238,38 @@ def get_prediction(image_path):
             )
 
 
-            # Prevent coordinates from leaving the image
-            x1 = max(0, x1)
-            y1 = max(0, y1)
-
-            x2 = min(
-                image.shape[1],
-                x2
+            # Keep coordinates
+            # inside the image
+            x1 = max(
+                0,
+                min(
+                    x1,
+                    image_width
+                )
             )
 
-            y2 = min(
-                image.shape[0],
-                y2
+            x2 = max(
+                0,
+                min(
+                    x2,
+                    image_width
+                )
+            )
+
+            y1 = max(
+                0,
+                min(
+                    y1,
+                    image_height
+                )
+            )
+
+            y2 = max(
+                0,
+                min(
+                    y2,
+                    image_height
+                )
             )
 
 
@@ -182,7 +290,10 @@ def get_prediction(image_path):
 
             for res in results:
 
-                text = res["rec_text"]
+                text = res[
+                    "rec_text"
+                ]
+
 
                 if text.strip():
 
@@ -194,9 +305,15 @@ def get_prediction(image_path):
         if line_texts:
 
             predicted_lines.append(
-                " ".join(line_texts)
+                " ".join(
+                    line_texts
+                )
             )
 
+
+    # -----------------------------------------------------
+    # Final OCR Text
+    # -----------------------------------------------------
 
     predicted_text = "\n".join(
         predicted_lines
@@ -219,8 +336,8 @@ def prepare_input(text):
     )["input_ids"]
 
 
-    # T5 maximum input = 512 tokens
-    # Leave one token for EOS
+    # T5 maximum input length
+    # used during training = 512
 
     if len(tokens) <= 511:
 
@@ -228,13 +345,16 @@ def prepare_input(text):
 
     else:
 
-        # Preserve beginning and end of receipt
+        # Keep beginning and end
+        # of long receipts
+
         first_part = tokens[:350]
 
         last_part = tokens[-161:]
 
         final_tokens = (
-            first_part + last_part
+            first_part
+            + last_part
         )
 
 
@@ -300,46 +420,59 @@ def parse_output(text):
     }
 
 
-    # Find the labels generated by T5
     label_pattern = re.compile(
         r"(company|address|date|total)\s*:",
         re.IGNORECASE
     )
 
+
     matches = list(
-        label_pattern.finditer(text)
+        label_pattern.finditer(
+            text
+        )
     )
 
 
-    # Parse whatever fields are present.
-    # This avoids losing everything if T5 misses one label.
-
-    for i, match in enumerate(matches):
+    for i, match in enumerate(
+        matches
+    ):
 
         field_name = (
-            match.group(1).lower()
+            match
+            .group(1)
+            .lower()
         )
 
-        value_start = match.end()
+
+        value_start = (
+            match.end()
+        )
 
 
         if i + 1 < len(matches):
 
             value_end = (
-                matches[i + 1].start()
+                matches[
+                    i + 1
+                ].start()
             )
 
         else:
 
-            value_end = len(text)
+            value_end = len(
+                text
+            )
 
 
         value = text[
-            value_start:value_end
+            value_start:
+            value_end
         ].strip()
 
 
-        fields[field_name] = value
+        fields[
+            field_name
+        ] = value
 
 
     return fields
@@ -351,11 +484,18 @@ def parse_output(text):
 
 def process_receipt(image_path):
 
-    # 1. Image -> detected and recognized text
+    # -----------------------------------------------------
+    # Step 1: OCR
+    # -----------------------------------------------------
+
     ocr_text = get_prediction(
         image_path
     )
 
+
+    # -----------------------------------------------------
+    # No text detected
+    # -----------------------------------------------------
 
     if not ocr_text.strip():
 
@@ -369,17 +509,27 @@ def process_receipt(image_path):
         }
 
 
-    # 2. OCR text -> T5
+    # -----------------------------------------------------
+    # Step 2: T5 Extraction
+    # -----------------------------------------------------
+
     t5_output = extract_information(
         ocr_text
     )
 
 
-    # 3. T5 output -> structured fields
+    # -----------------------------------------------------
+    # Step 3: Parse Output
+    # -----------------------------------------------------
+
     fields = parse_output(
         t5_output
     )
 
+
+    # -----------------------------------------------------
+    # Final Result
+    # -----------------------------------------------------
 
     return {
         "company": fields["company"],
