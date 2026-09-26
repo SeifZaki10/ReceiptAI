@@ -1,0 +1,10 @@
+streamlit==1.64.0
+ultralytics==8.4.163
+opencv-python-headless==5.0.0.93
+numpy==2.3.5
+pillow==12.3.0
+torch==2.14.0
+transformers==5.17.0
+sentencepiece==0.2.2
+paddlepaddle==3.3.1
+paddleocr==3.7.0
