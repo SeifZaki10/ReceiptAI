@@ -1,5 +1,8 @@
 from pathlib import Path
 import tempfile
+import json
+import csv
+import io
 
 import streamlit as st
 
@@ -49,6 +52,17 @@ def load_css():
 
 
 load_css()
+
+
+# =========================================================
+# Receipt History
+# =========================================================
+
+if "receipt_history" not in st.session_state:
+
+    st.session_state[
+        "receipt_history"
+    ] = []
 
 
 # =========================================================
@@ -136,7 +150,7 @@ if uploaded_file is not None:
 
         st.image(
             uploaded_file,
-            use_container_width=True
+            width="stretch"
         )
 
 
@@ -259,6 +273,35 @@ if uploaded_file is not None:
 
 
             # =============================================
+            # Prepare Editable Values
+            # =============================================
+
+            company_value = (
+                result["company"].strip()
+                if result["company"]
+                else "Not detected"
+            )
+
+            address_value = (
+                result["address"].strip()
+                if result["address"]
+                else "Not detected"
+            )
+
+            date_value = (
+                result["date"].strip()
+                if result["date"]
+                else "Not detected"
+            )
+
+            total_value = (
+                result["total"].strip()
+                if result["total"]
+                else "Not detected"
+            )
+
+
+            # =============================================
             # Company
             # =============================================
 
@@ -266,13 +309,12 @@ if uploaded_file is not None:
                 "##### 🏢 Company"
             )
 
-            company = (
-                result["company"]
-                if result["company"]
-                else "Not detected"
+            company = st.text_input(
+                "Company",
+                value=company_value,
+                label_visibility="collapsed",
+                key=f"company_{uploaded_file.name}"
             )
-
-            st.info(company)
 
 
             # =============================================
@@ -283,13 +325,12 @@ if uploaded_file is not None:
                 "##### 📍 Address"
             )
 
-            address = (
-                result["address"]
-                if result["address"]
-                else "Not detected"
+            address = st.text_input(
+                "Address",
+                value=address_value,
+                label_visibility="collapsed",
+                key=f"address_{uploaded_file.name}"
             )
-
-            st.info(address)
 
 
             # =============================================
@@ -307,13 +348,12 @@ if uploaded_file is not None:
                     "##### 📅 Date"
                 )
 
-                date = (
-                    result["date"]
-                    if result["date"]
-                    else "Not detected"
+                date = st.text_input(
+                    "Date",
+                    value=date_value,
+                    label_visibility="collapsed",
+                    key=f"date_{uploaded_file.name}"
                 )
-
-                st.info(date)
 
 
             with total_column:
@@ -322,13 +362,85 @@ if uploaded_file is not None:
                     "##### 💰 Total"
                 )
 
-                total = (
-                    result["total"]
-                    if result["total"]
-                    else "Not detected"
+                total = st.text_input(
+                    "Total",
+                    value=total_value,
+                    label_visibility="collapsed",
+                    key=f"total_{uploaded_file.name}"
                 )
 
-                st.success(total)
+
+            # =============================================
+            # Current Receipt Data
+            # =============================================
+
+            current_receipt = {
+                "company": company,
+                "address": address,
+                "date": date,
+                "total": total
+            }
+
+
+            # =============================================
+            # Add Receipt + JSON
+            # =============================================
+
+            st.write("")
+
+            action_column, json_column = (
+                st.columns(2)
+            )
+
+
+            with action_column:
+
+                add_receipt = st.button(
+                    "➕ Add Receipt to List",
+                    type="primary",
+                    use_container_width=True
+                )
+
+
+            with json_column:
+
+                json_data = json.dumps(
+                    current_receipt,
+                    indent=4,
+                    ensure_ascii=False
+                )
+
+                st.download_button(
+                    label="⬇️ Download Current JSON",
+                    data=json_data,
+                    file_name="receipt_data.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+
+
+            # =============================================
+            # Add to Receipt History
+            # =============================================
+
+            if add_receipt:
+
+                receipt_record = {
+                    "company": company,
+                    "address": address,
+                    "date": date,
+                    "total": total
+                }
+
+                st.session_state[
+                    "receipt_history"
+                ].append(
+                    receipt_record
+                )
+
+                st.success(
+                    "Receipt added to the list!"
+                )
 
 
             # =============================================
@@ -361,14 +473,10 @@ if uploaded_file is not None:
                     "### T5 Model Output"
                 )
 
-                if result[
-                    "raw_t5_output"
-                ]:
+                if result["raw_t5_output"]:
 
                     st.code(
-                        result[
-                            "raw_t5_output"
-                        ],
+                        result["raw_t5_output"],
                         language=None
                     )
 
@@ -389,6 +497,118 @@ if uploaded_file is not None:
                 "Click **Analyze Receipt** to extract "
                 "the receipt information."
             )
+
+
+# =========================================================
+# Receipt History
+# =========================================================
+
+st.divider()
+
+st.header(
+    "📋 Receipt History"
+)
+
+
+receipt_history = st.session_state[
+    "receipt_history"
+]
+
+
+if receipt_history:
+
+    receipt_count = len(
+        receipt_history
+    )
+
+    st.write(
+        f"**{receipt_count} receipt(s) added**"
+    )
+
+
+    # =====================================================
+    # Show History Table
+    # =====================================================
+
+    st.dataframe(
+        receipt_history,
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+    # =====================================================
+    # Create One CSV for All Receipts
+    # =====================================================
+
+    csv_buffer = io.StringIO()
+
+    csv_writer = csv.DictWriter(
+        csv_buffer,
+        fieldnames=[
+            "company",
+            "address",
+            "date",
+            "total"
+        ]
+    )
+
+    csv_writer.writeheader()
+
+    csv_writer.writerows(
+        receipt_history
+    )
+
+    all_receipts_csv = (
+        csv_buffer.getvalue()
+    )
+
+
+    # =====================================================
+    # History Actions
+    # =====================================================
+
+    download_column, clear_column = (
+        st.columns(2)
+    )
+
+
+    with download_column:
+
+        st.download_button(
+            label="⬇️ Download All Receipts CSV",
+            data=all_receipts_csv,
+            file_name="receipt_history.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+
+    with clear_column:
+
+        clear_history = st.button(
+            "🗑️ Clear History",
+            use_container_width=True
+        )
+
+
+    if clear_history:
+
+        st.session_state[
+            "receipt_history"
+        ] = []
+
+        st.rerun()
+
+
+else:
+
+    st.info(
+        "No receipts have been added yet. "
+        "Analyze a receipt, review the extracted "
+        "information, then click "
+        "**Add Receipt to List**."
+    )
 
 
 # =========================================================
@@ -497,5 +717,6 @@ st.markdown(
 st.divider()
 
 st.caption(
-    "ReceiptAI • Computer Vision • OCR • Transformer-based Information Extraction"
+    "ReceiptAI • Computer Vision • OCR • "
+    "Transformer-based Information Extraction"
 )

@@ -18,7 +18,8 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 BASE_DIR = Path(__file__).resolve().parent
 
 YOLO_PATH = BASE_DIR / "models" / "best (3).pt"
-T5_PATH = BASE_DIR / "models" / "final_t5_receipt_model"
+
+T5_PATH = BASE_DIR / "models" / "final_t5_receipt_model_v2"
 
 
 # =========================================================
@@ -28,14 +29,15 @@ T5_PATH = BASE_DIR / "models" / "final_t5_receipt_model"
 @st.cache_resource
 def load_models():
 
-    yolo_model = YOLO(
-        str(YOLO_PATH)
-    )
+    # YOLO text detector
+    yolo_model = YOLO(str(YOLO_PATH))
 
+    # PaddleOCR text recognizer
     recognizer = TextRecognition(
         model_name="en_PP-OCRv4_mobile_rec"
     )
 
+    # T5 tokenizer + model
     tokenizer = AutoTokenizer.from_pretrained(
         str(T5_PATH)
     )
@@ -60,13 +62,8 @@ def load_models():
     )
 
 
-(
-    yolo_model,
-    recognizer,
-    tokenizer,
-    t5_model,
-    device
-) = load_models()
+# Load once
+yolo_model, recognizer, tokenizer, t5_model, device = load_models()
 
 
 # =========================================================
@@ -74,6 +71,10 @@ def load_models():
 # =========================================================
 
 def get_prediction(image_path):
+
+    # -----------------------------
+    # YOLO Text Detection
+    # -----------------------------
 
     result = yolo_model.predict(
         source=image_path,
@@ -84,19 +85,22 @@ def get_prediction(image_path):
 
     image = result.orig_img
 
-    boxes = (
-        result.boxes.xyxy
-        .cpu()
-        .numpy()
-    )
+    boxes = result.boxes.xyxy.cpu().numpy()
 
-    # Sort boxes by vertical center
+    # -----------------------------
+    # Sort boxes vertically
+    # -----------------------------
+
     boxes = sorted(
         boxes,
         key=lambda box: (box[1] + box[3]) / 2
     )
 
     lines = []
+
+    # -----------------------------
+    # Group boxes into text lines
+    # -----------------------------
 
     for box in boxes:
 
@@ -109,10 +113,10 @@ def get_prediction(image_path):
 
         for line in lines:
 
-            if (
-                abs(cy - line["cy"])
-                < min(height, line["height"]) * 0.5
-            ):
+            if abs(cy - line["cy"]) < min(
+                height,
+                line["height"]
+            ) * 0.5:
 
                 line["boxes"].append(box)
 
@@ -128,18 +132,23 @@ def get_prediction(image_path):
                 "boxes": [box]
             })
 
-    # Sort lines from top to bottom
+    # -----------------------------
+    # Sort lines top → bottom
+    # -----------------------------
+
     lines.sort(
         key=lambda line: line["cy"]
     )
 
     predicted_lines = []
 
-    h, w = image.shape[:2]
+    # -----------------------------
+    # PaddleOCR Recognition
+    # -----------------------------
 
     for line in lines:
 
-        # Sort boxes from left to right
+        # Sort words left → right
         line["boxes"].sort(
             key=lambda box: box[0]
         )
@@ -148,14 +157,14 @@ def get_prediction(image_path):
 
         for box in line["boxes"]:
 
-            x1, y1, x2, y2 = map(
-                int,
-                box
-            )
+            x1, y1, x2, y2 = map(int, box)
 
-            # Keep coordinates inside image
+            # Keep crop inside image boundaries
+            h, w = image.shape[:2]
+
             x1 = max(0, x1)
             y1 = max(0, y1)
+
             x2 = min(w, x2)
             y2 = min(h, y2)
 
@@ -176,7 +185,6 @@ def get_prediction(image_path):
                 text = res["rec_text"]
 
                 if text.strip():
-
                     line_texts.append(
                         text.strip()
                     )
@@ -187,6 +195,7 @@ def get_prediction(image_path):
                 " ".join(line_texts)
             )
 
+    # Final OCR text
     predicted_text = "\n".join(
         predicted_lines
     )
@@ -206,19 +215,25 @@ def prepare_input(text):
         add_special_tokens=False
     )["input_ids"]
 
+    # T5 maximum input length = 512
+    # Reserve one token for EOS
+
     if len(tokens) <= 511:
 
         final_tokens = tokens
 
     else:
 
+        # Keep beginning + end of receipt
         first_part = tokens[:350]
+
         last_part = tokens[-161:]
 
         final_tokens = (
             first_part + last_part
         )
 
+    # Add EOS token
     final_tokens.append(
         tokenizer.eos_token_id
     )
@@ -253,12 +268,12 @@ def extract_information(ocr_text):
             max_new_tokens=96
         )
 
-    result = tokenizer.decode(
+    output_text = tokenizer.decode(
         outputs[0],
         skip_special_tokens=True
     )
 
-    return result
+    return output_text
 
 
 # =========================================================
@@ -273,6 +288,12 @@ def parse_output(text):
         "date": "",
         "total": ""
     }
+
+    # Find:
+    # company:
+    # address:
+    # date:
+    # total:
 
     label_pattern = re.compile(
         r"(company|address|date|total)\s*:",
@@ -311,159 +332,38 @@ def parse_output(text):
 
 
 # =========================================================
-# Rule-Based Total Extraction
-# =========================================================
-
-def extract_total_rule(ocr_text):
-
-    patterns = [
-
-        # GRAND TOTAL 678.30
-        # GRAND TOTAL RM 678.30
-        r"\bgrand\s*total\s*[:\-]?\s*"
-        r"(?:RM|EGP|LE|\$)?\s*"
-        r"(\d+(?:[.,]\d{2}))",
-
-        # TOTAL 678.30
-        # TOTAL: 678.30
-        # TOTAL RM 678.30
-        r"\btotal\s*[:\-]?\s*"
-        r"(?:RM|EGP|LE|\$)?\s*"
-        r"(\d+(?:[.,]\d{2}))"
-    ]
-
-    for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            ocr_text,
-            re.IGNORECASE
-        )
-
-        if match:
-
-            total = match.group(1)
-
-            total = total.replace(
-                ",",
-                "."
-            )
-
-            return total
-
-    return ""
-
-
-# =========================================================
-# Rule-Based Date Extraction
-# =========================================================
-
-def extract_date_rule(ocr_text):
-
-    patterns = [
-
-        # DD/MM/YYYY or MM/DD/YYYY
-        # Examples:
-        # 25/12/2018
-        # 09/24/2026
-        r"\b(\d{1,2}/\d{1,2}/\d{4})",
-
-        # DD-MM-YYYY or MM-DD-YYYY
-        r"\b(\d{1,2}-\d{1,2}-\d{4})",
-
-        # DD/MM/YY or MM/DD/YY
-        r"\b(\d{1,2}/\d{1,2}/\d{2})",
-
-        # DD-MM-YY or MM-DD-YY
-        r"\b(\d{1,2}-\d{1,2}-\d{2})"
-    ]
-
-    for pattern in patterns:
-
-        match = re.search(
-            pattern,
-            ocr_text,
-            re.IGNORECASE
-        )
-
-        if match:
-
-            return match.group(1)
-
-    return ""
-
-
-# =========================================================
 # Complete Receipt Pipeline
 # =========================================================
 
 def process_receipt(image_path):
 
-    # -----------------------------------------------------
-    # 1. YOLO + PaddleOCR
-    # -----------------------------------------------------
-
+    # Step 1:
+    # YOLO + PaddleOCR
     ocr_text = get_prediction(
         image_path
     )
 
-    # -----------------------------------------------------
-    # 2. T5 Information Extraction
-    # -----------------------------------------------------
-
+    # Step 2:
+    # T5 V2
     t5_output = extract_information(
         ocr_text
     )
 
-    # -----------------------------------------------------
-    # 3. Parse T5 Output
-    # -----------------------------------------------------
-
+    # Step 3:
+    # Parse structured fields
     fields = parse_output(
         t5_output
     )
 
-    # -----------------------------------------------------
-    # 4. Hybrid Rule-Based Extraction
-    # -----------------------------------------------------
-
-    # Try extracting Total directly from OCR
-    rule_total = extract_total_rule(
-        ocr_text
-    )
-
-    # Try extracting Date directly from OCR
-    rule_date = extract_date_rule(
-        ocr_text
-    )
-
-    # If Regex finds a Total,
-    # prefer it over T5
-    if rule_total:
-
-        fields["total"] = rule_total
-
-    # If Regex finds a Date,
-    # prefer it over T5
-    if rule_date:
-
-        fields["date"] = rule_date
-
-    # -----------------------------------------------------
-    # 5. Return Final Results
-    # -----------------------------------------------------
-
+    # Step 4:
+    # Return final result
     return {
-
         "company": fields["company"],
-
         "address": fields["address"],
-
         "date": fields["date"],
-
         "total": fields["total"],
 
+        # Advanced details
         "ocr_text": ocr_text,
-
         "raw_t5_output": t5_output
     }
