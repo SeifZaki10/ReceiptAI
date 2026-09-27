@@ -5,6 +5,9 @@ import cv2
 import numpy as np
 import torch
 import streamlit as st
+import transformers
+import paddle
+import paddleocr
 
 from ultralytics import YOLO
 from paddleocr import TextRecognition
@@ -29,29 +32,76 @@ T5_PATH = BASE_DIR / "models" / "final_t5_receipt_model_v2"
 @st.cache_resource
 def load_models():
 
+    print("\n")
+    print("=========================================")
+    print("       RECEIPTAI MODEL DEBUG")
+    print("=========================================")
+
+    print("BASE DIR:", BASE_DIR)
+
+    print("YOLO PATH:", YOLO_PATH)
+    print("YOLO EXISTS:", YOLO_PATH.exists())
+
+    print("T5 PATH:", T5_PATH)
+    print("T5 EXISTS:", T5_PATH.exists())
+
+    print("-----------------------------------------")
+    print("PACKAGE VERSIONS")
+    print("-----------------------------------------")
+
+    print("Torch:", torch.__version__)
+    print("Transformers:", transformers.__version__)
+    print("Paddle:", paddle.__version__)
+    print("PaddleOCR:", paddleocr.__version__)
+
+    print("-----------------------------------------")
+
+
     # YOLO text detector
     yolo_model = YOLO(str(YOLO_PATH))
+
+    print("YOLO MODEL LOADED")
+
 
     # PaddleOCR text recognizer
     recognizer = TextRecognition(
         model_name="en_PP-OCRv4_mobile_rec"
     )
 
-    # T5 tokenizer + model
+    print("PADDLE OCR LOADED")
+
+
+    # T5 tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         str(T5_PATH)
     )
 
+    print("TOKENIZER PATH:", tokenizer.name_or_path)
+
+
+    # T5 model
     t5_model = AutoModelForSeq2SeqLM.from_pretrained(
         str(T5_PATH)
     )
 
+    print("T5 MODEL LOADED FROM:", T5_PATH)
+
+
+    # Device
     device = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
     )
 
     t5_model.to(device)
     t5_model.eval()
+
+    print("DEVICE:", device)
+
+    print("=========================================")
+    print("       MODEL LOADING COMPLETE")
+    print("=========================================")
+    print("\n")
+
 
     return (
         yolo_model,
@@ -87,6 +137,7 @@ def get_prediction(image_path):
 
     boxes = result.boxes.xyxy.cpu().numpy()
 
+
     # -----------------------------
     # Sort boxes vertically
     # -----------------------------
@@ -97,6 +148,7 @@ def get_prediction(image_path):
     )
 
     lines = []
+
 
     # -----------------------------
     # Group boxes into text lines
@@ -132,6 +184,7 @@ def get_prediction(image_path):
                 "boxes": [box]
             })
 
+
     # -----------------------------
     # Sort lines top → bottom
     # -----------------------------
@@ -141,6 +194,7 @@ def get_prediction(image_path):
     )
 
     predicted_lines = []
+
 
     # -----------------------------
     # PaddleOCR Recognition
@@ -185,6 +239,7 @@ def get_prediction(image_path):
                 text = res["rec_text"]
 
                 if text.strip():
+
                     line_texts.append(
                         text.strip()
                     )
@@ -194,6 +249,7 @@ def get_prediction(image_path):
             predicted_lines.append(
                 " ".join(line_texts)
             )
+
 
     # Final OCR text
     predicted_text = "\n".join(
@@ -215,6 +271,7 @@ def prepare_input(text):
         add_special_tokens=False
     )["input_ids"]
 
+
     # T5 maximum input length = 512
     # Reserve one token for EOS
 
@@ -225,6 +282,7 @@ def prepare_input(text):
     else:
 
         # Keep beginning + end of receipt
+
         first_part = tokens[:350]
 
         last_part = tokens[-161:]
@@ -233,7 +291,9 @@ def prepare_input(text):
             first_part + last_part
         )
 
+
     # Add EOS token
+
     final_tokens.append(
         tokenizer.eos_token_id
     )
@@ -260,6 +320,7 @@ def extract_information(ocr_text):
         input_ids
     )
 
+
     with torch.no_grad():
 
         outputs = t5_model.generate(
@@ -267,6 +328,7 @@ def extract_information(ocr_text):
             attention_mask=attention_mask,
             max_new_tokens=96
         )
+
 
     output_text = tokenizer.decode(
         outputs[0],
@@ -289,11 +351,6 @@ def parse_output(text):
         "total": ""
     }
 
-    # Find:
-    # company:
-    # address:
-    # date:
-    # total:
 
     label_pattern = re.compile(
         r"(company|address|date|total)\s*:",
@@ -304,6 +361,7 @@ def parse_output(text):
         label_pattern.finditer(text)
     )
 
+
     for i, match in enumerate(matches):
 
         field_name = (
@@ -311,6 +369,7 @@ def parse_output(text):
         )
 
         value_start = match.end()
+
 
         if i + 1 < len(matches):
 
@@ -322,11 +381,14 @@ def parse_output(text):
 
             value_end = len(text)
 
+
         value = text[
             value_start:value_end
         ].strip()
 
+
         fields[field_name] = value
+
 
     return fields
 
@@ -339,31 +401,45 @@ def process_receipt(image_path):
 
     # Step 1:
     # YOLO + PaddleOCR
+
     ocr_text = get_prediction(
         image_path
     )
 
+
     # Step 2:
     # T5 V2
+
     t5_output = extract_information(
         ocr_text
     )
 
+
     # Step 3:
     # Parse structured fields
+
     fields = parse_output(
         t5_output
     )
 
+
     # Step 4:
     # Return final result
+
     return {
+
         "company": fields["company"],
+
         "address": fields["address"],
+
         "date": fields["date"],
+
         "total": fields["total"],
 
+
         # Advanced details
+
         "ocr_text": ocr_text,
+
         "raw_t5_output": t5_output
     }
