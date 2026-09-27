@@ -28,7 +28,9 @@ T5_PATH = BASE_DIR / "models" / "final_t5_receipt_model"
 @st.cache_resource
 def load_models():
 
-    yolo_model = YOLO(str(YOLO_PATH))
+    yolo_model = YOLO(
+        str(YOLO_PATH)
+    )
 
     recognizer = TextRecognition(
         model_name="en_PP-OCRv4_mobile_rec"
@@ -316,14 +318,12 @@ def extract_total_rule(ocr_text):
 
     patterns = [
 
-        # Example:
         # GRAND TOTAL 678.30
         # GRAND TOTAL RM 678.30
         r"\bgrand\s*total\s*[:\-]?\s*"
         r"(?:RM|EGP|LE|\$)?\s*"
         r"(\d+(?:[.,]\d{2}))",
 
-        # Example:
         # TOTAL 678.30
         # TOTAL: 678.30
         # TOTAL RM 678.30
@@ -399,43 +399,58 @@ def extract_date_rule(ocr_text):
 
 def process_receipt(image_path):
 
+    # -----------------------------------------------------
     # 1. YOLO + PaddleOCR
+    # -----------------------------------------------------
+
     ocr_text = get_prediction(
         image_path
     )
 
-    # 2. T5 information extraction
+    # -----------------------------------------------------
+    # 2. T5 Information Extraction
+    # -----------------------------------------------------
+
     t5_output = extract_information(
         ocr_text
     )
 
-    # 3. Parse T5 output
+    # -----------------------------------------------------
+    # 3. Parse T5 Output
+    # -----------------------------------------------------
+
     fields = parse_output(
         t5_output
     )
 
     # -----------------------------------------------------
-    # 4. Hybrid Rule-Based Fallbacks
+    # 4. Hybrid Rule-Based Extraction
     # -----------------------------------------------------
 
-    # If T5 could not detect Total,
-    # try extracting it directly from OCR text
-    if not fields["total"]:
+    # Try extracting Total directly from OCR
+    rule_total = extract_total_rule(
+        ocr_text
+    )
 
-        fields["total"] = extract_total_rule(
-            ocr_text
-        )
+    # Try extracting Date directly from OCR
+    rule_date = extract_date_rule(
+        ocr_text
+    )
 
-    # If T5 could not detect Date,
-    # try extracting it directly from OCR text
-    if not fields["date"]:
+    # If Regex finds a Total,
+    # prefer it over T5
+    if rule_total:
 
-        fields["date"] = extract_date_rule(
-            ocr_text
-        )
+        fields["total"] = rule_total
+
+    # If Regex finds a Date,
+    # prefer it over T5
+    if rule_date:
+
+        fields["date"] = rule_date
 
     # -----------------------------------------------------
-    # 5. Return final results
+    # 5. Return Final Results
     # -----------------------------------------------------
 
     return {
