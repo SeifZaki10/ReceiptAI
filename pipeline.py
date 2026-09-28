@@ -56,12 +56,10 @@ def load_models():
 
     print("-----------------------------------------")
 
-
     # YOLO text detector
     yolo_model = YOLO(str(YOLO_PATH))
 
     print("YOLO MODEL LOADED")
-
 
     # PaddleOCR text recognizer
     recognizer = TextRecognition(
@@ -70,7 +68,6 @@ def load_models():
 
     print("PADDLE OCR LOADED")
 
-
     # T5 tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         str(T5_PATH)
@@ -78,14 +75,12 @@ def load_models():
 
     print("TOKENIZER PATH:", tokenizer.name_or_path)
 
-
     # T5 model
     t5_model = AutoModelForSeq2SeqLM.from_pretrained(
         str(T5_PATH)
     )
 
     print("T5 MODEL LOADED FROM:", T5_PATH)
-
 
     # Device
     device = torch.device(
@@ -102,7 +97,6 @@ def load_models():
     print("=========================================")
     print("\n")
 
-
     return (
         yolo_model,
         recognizer,
@@ -117,26 +111,189 @@ yolo_model, recognizer, tokenizer, t5_model, device = load_models()
 
 
 # =========================================================
+# Receipt Orientation Preprocessing
+# =========================================================
+
+def rotate_90(image, angle):
+
+    if angle == 0:
+        return image
+
+    elif angle == 90:
+        return cv2.rotate(
+            image,
+            cv2.ROTATE_90_CLOCKWISE
+        )
+
+    elif angle == 180:
+        return cv2.rotate(
+            image,
+            cv2.ROTATE_180
+        )
+
+    elif angle == 270:
+        return cv2.rotate(
+            image,
+            cv2.ROTATE_90_COUNTERCLOCKWISE
+        )
+
+    return image
+
+
+def get_orientation_score(image, max_crops=10):
+
+    # Run YOLO only to obtain sample text crops
+    result = yolo_model.predict(
+        source=image,
+        conf=0.4,
+        imgsz=640,
+        verbose=False
+    )[0]
+
+    boxes = result.boxes.xyxy.cpu().numpy()
+
+    if len(boxes) == 0:
+        return 0.0
+
+    scores = []
+
+    # Only use a small number of crops
+    # to keep orientation detection faster
+    for box in boxes[:max_crops]:
+
+        x1, y1, x2, y2 = map(int, box)
+
+        h, w = image.shape[:2]
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(w, x2)
+        y2 = min(h, y2)
+
+        crop = image[y1:y2, x1:x2]
+
+        if crop.size == 0:
+            continue
+
+        results = recognizer.predict(
+            input=crop
+        )
+
+        for res in results:
+
+            text = res["rec_text"].strip()
+            score = float(res["rec_score"])
+
+            if text:
+                scores.append(score)
+
+    if not scores:
+        return 0.0
+
+    return sum(scores) / len(scores)
+
+
+def correct_orientation(image):
+
+    # Try the four main document orientations
+    candidates = {
+        0: image,
+        90: rotate_90(image, 90),
+        180: rotate_90(image, 180),
+        270: rotate_90(image, 270)
+    }
+
+    scores = {}
+
+    for angle, candidate in candidates.items():
+
+        scores[angle] = get_orientation_score(
+            candidate
+        )
+
+    best_angle = max(
+        scores,
+        key=scores.get
+    )
+
+    original_score = scores[0]
+    best_score = scores[best_angle]
+
+    print("Orientation scores:", scores)
+
+    # Do not rotate a normal image because of
+    # a very small confidence difference
+    MIN_IMPROVEMENT = 0.10
+
+    if (
+        best_angle != 0
+        and best_score > original_score + MIN_IMPROVEMENT
+    ):
+
+        print(
+            f"Orientation corrected: "
+            f"{best_angle} degrees"
+        )
+
+        return candidates[best_angle]
+
+    print("Orientation correction not needed")
+
+    return image
+
+
+def fix_receipt(image):
+
+    # Adaptive orientation correction:
+    # normal receipts remain unchanged
+    # rotated receipts can be corrected
+    image = correct_orientation(image)
+
+    return image
+
+
+# =========================================================
 # YOLO + PaddleOCR
 # =========================================================
 
 def get_prediction(image_path):
 
     # -----------------------------
+    # Read Image
+    # -----------------------------
+
+    image = cv2.imread(image_path)
+
+    if image is None:
+        raise ValueError(
+            f"Could not read image: {image_path}"
+        )
+
+    # -----------------------------
+    # Adaptive Orientation Correction
+    # -----------------------------
+
+    image = fix_receipt(image)
+
+    # -----------------------------
     # YOLO Text Detection
     # -----------------------------
 
+    # IMPORTANT:
+    # Use the corrected image,
+    # not the original image_path.
     result = yolo_model.predict(
-        source=image_path,
+        source=image,
         conf=0.4,
         imgsz=640,
         verbose=False
     )[0]
 
+    # This is now the corrected image
+    # that was given to YOLO.
     image = result.orig_img
 
     boxes = result.boxes.xyxy.cpu().numpy()
-
 
     # -----------------------------
     # Sort boxes vertically
@@ -148,7 +305,6 @@ def get_prediction(image_path):
     )
 
     lines = []
-
 
     # -----------------------------
     # Group boxes into text lines
@@ -184,7 +340,6 @@ def get_prediction(image_path):
                 "boxes": [box]
             })
 
-
     # -----------------------------
     # Sort lines top → bottom
     # -----------------------------
@@ -194,7 +349,6 @@ def get_prediction(image_path):
     )
 
     predicted_lines = []
-
 
     # -----------------------------
     # PaddleOCR Recognition
@@ -250,7 +404,6 @@ def get_prediction(image_path):
                 " ".join(line_texts)
             )
 
-
     # Final OCR text
     predicted_text = "\n".join(
         predicted_lines
@@ -271,7 +424,6 @@ def prepare_input(text):
         add_special_tokens=False
     )["input_ids"]
 
-
     # T5 maximum input length = 512
     # Reserve one token for EOS
 
@@ -282,18 +434,14 @@ def prepare_input(text):
     else:
 
         # Keep beginning + end of receipt
-
         first_part = tokens[:350]
-
         last_part = tokens[-161:]
 
         final_tokens = (
             first_part + last_part
         )
 
-
     # Add EOS token
-
     final_tokens.append(
         tokenizer.eos_token_id
     )
@@ -320,7 +468,6 @@ def extract_information(ocr_text):
         input_ids
     )
 
-
     with torch.no_grad():
 
         outputs = t5_model.generate(
@@ -328,7 +475,6 @@ def extract_information(ocr_text):
             attention_mask=attention_mask,
             max_new_tokens=96
         )
-
 
     output_text = tokenizer.decode(
         outputs[0],
@@ -351,7 +497,6 @@ def parse_output(text):
         "total": ""
     }
 
-
     label_pattern = re.compile(
         r"(company|address|date|total)\s*:",
         re.IGNORECASE
@@ -361,7 +506,6 @@ def parse_output(text):
         label_pattern.finditer(text)
     )
 
-
     for i, match in enumerate(matches):
 
         field_name = (
@@ -369,7 +513,6 @@ def parse_output(text):
         )
 
         value_start = match.end()
-
 
         if i + 1 < len(matches):
 
@@ -381,14 +524,11 @@ def parse_output(text):
 
             value_end = len(text)
 
-
         value = text[
             value_start:value_end
         ].strip()
 
-
         fields[field_name] = value
-
 
     return fields
 
@@ -400,12 +540,12 @@ def parse_output(text):
 def process_receipt(image_path):
 
     # Step 1:
-    # YOLO + PaddleOCR
+    # Adaptive Orientation Correction
+    # + YOLO + PaddleOCR
 
     ocr_text = get_prediction(
         image_path
     )
-
 
     # Step 2:
     # T5 V2
@@ -414,14 +554,12 @@ def process_receipt(image_path):
         ocr_text
     )
 
-
     # Step 3:
     # Parse structured fields
 
     fields = parse_output(
         t5_output
     )
-
 
     # Step 4:
     # Return final result
@@ -436,9 +574,7 @@ def process_receipt(image_path):
 
         "total": fields["total"],
 
-
         # Advanced details
-
         "ocr_text": ocr_text,
 
         "raw_t5_output": t5_output
